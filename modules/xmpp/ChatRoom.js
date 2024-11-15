@@ -1,8 +1,9 @@
 import { safeJsonParse } from '@jitsi/js-utils/json';
 import { getLogger } from '@jitsi/logger';
 import $ from 'jquery';
-import isEqual from 'lodash.isequal';
+import { isEqual } from 'lodash-es';
 import { $iq, $msg, $pres, Strophe } from 'strophe.js';
+import { v4 as uuidv4 } from 'uuid';
 
 import { AUTH_ERROR_TYPES } from '../../JitsiConferenceErrors';
 import * as JitsiTranscriptionStatus from '../../JitsiTranscriptionStatus';
@@ -20,6 +21,7 @@ import BreakoutRooms from './BreakoutRooms';
 import Lobby from './Lobby';
 import RoomMetadata from './RoomMetadata';
 import XmppConnection from './XmppConnection';
+import { FEATURE_TRANSCRIBER } from './xmpp';
 
 const logger = getLogger(__filename);
 
@@ -238,6 +240,9 @@ export default class ChatRoom extends Listenable {
             const preJoin
                 = this.options.disableFocus
                     ? Promise.resolve()
+                        .finally(() => {
+                            this.xmpp.connection._breakoutMovingToMain = undefined;
+                        })
                     : this.xmpp.moderator.sendConferenceRequest(this.roomjid);
 
             preJoin.then(() => {
@@ -248,7 +253,8 @@ export default class ChatRoom extends Listenable {
                         this.onConnStatusChanged.bind(this))
                 );
                 resolve();
-            });
+            })
+            .catch(e => logger.trace('PreJoin rejected', e));
         });
     }
 
@@ -583,6 +589,9 @@ export default class ChatRoom extends Listenable {
             case 'nick':
                 member.nick = node.value;
                 break;
+            case 'silent':
+                member.isSilent = node.value;
+                break;
             case 'userId':
                 member.id = node.value;
                 break;
@@ -685,7 +694,8 @@ export default class ChatRoom extends Listenable {
                     member.botType,
                     member.jid,
                     member.features,
-                    member.isReplaceParticipant);
+                    member.isReplaceParticipant,
+                    member.isSilent);
 
                 // we are reporting the status with the join
                 // so we do not want a second event about status update
@@ -740,6 +750,11 @@ export default class ChatRoom extends Listenable {
                 memberOfThis.displayName = member.displayName;
             }
 
+            // join without audio
+            if (member.isSilent) {
+                memberOfThis.isSilent = member.isSilent;
+            }
+
             // update stored status message to be able to detect changes
             if (memberOfThis.status !== member.status) {
                 hasStatusUpdate = true;
@@ -756,6 +771,8 @@ export default class ChatRoom extends Listenable {
                 this.eventEmitter.emit(XMPPEvents.PARTICIPANT_FEATURES_CHANGED, from, member.features);
             }
         }
+
+        const participantProperties = new Map();
 
         // after we had fired member or room joined events, lets fire events
         // for the rest info we got in presence
@@ -776,6 +793,12 @@ export default class ChatRoom extends Listenable {
                         displayName);
                 }
                 break;
+            case 'silent':
+                this.eventEmitter.emit(
+                    XMPPEvents.SILENT_STATUS_CHANGED,
+                    from,
+                    member.isSilent);
+                break;
             case 'bridgeNotAvailable':
                 if (member.isFocus && !this.noBridgeAvailable) {
                     this.noBridgeAvailable = true;
@@ -795,13 +818,6 @@ export default class ChatRoom extends Listenable {
                     }
 
                     this.eventEmitter.emit(XMPPEvents.CONFERENCE_PROPERTIES_CHANGED, properties);
-
-                    // Log if Jicofo supports restart by terminate only once. This conference property does not change
-                    // during the call.
-                    if (typeof this.restartByTerminateSupported === 'undefined') {
-                        this.restartByTerminateSupported = properties['support-terminate-restart'] === 'true';
-                        logger.info(`Jicofo supports restart by terminate: ${this.supportsRestartByTerminate()}`);
-                    }
                 }
                 break;
             case 'transcription-status': {
@@ -813,14 +829,15 @@ export default class ChatRoom extends Listenable {
 
                 const { status } = attributes;
 
-                if (status && status !== this.transcriptionStatus) {
+                if (status && status !== this.transcriptionStatus
+                    && member.isHiddenDomain && member.features.has(FEATURE_TRANSCRIBER)) {
                     this.transcriptionStatus = status;
                     this.eventEmitter.emit(
                         XMPPEvents.TRANSCRIPTION_STATUS_CHANGED,
-                        status
+                        status,
+                        Strophe.getResourceFromJid(from)
                     );
                 }
-
 
                 break;
             }
@@ -835,9 +852,22 @@ export default class ChatRoom extends Listenable {
                 this.eventEmitter.emit(XMPPEvents.PHONE_NUMBER_CHANGED);
                 break;
             }
-            default:
-                this.processNode(node, from);
+            default: {
+                if (node.tagName.startsWith('jitsi_participant_')) {
+                    participantProperties
+                        .set(node.tagName.substring('jitsi_participant_'.length), node.value);
+                } else {
+                    this.processNode(node, from);
+                }
             }
+            }
+        }
+
+        // All participant properties are in `participantProperties`, call the event handlers now.
+        const participantId = Strophe.getResourceFromJid(from);
+
+        for (const [ key, value ] of participantProperties) {
+            this.participantPropertyListener(participantId, key, value);
         }
 
         // Trigger status message update if necessary
@@ -892,14 +922,6 @@ export default class ChatRoom extends Listenable {
     }
 
     /**
-     * Checks if Jicofo supports restarting Jingle session after 'session-terminate'.
-     * @returns {boolean}
-     */
-    supportsRestartByTerminate() {
-        return this.restartByTerminateSupported;
-    }
-
-    /**
      *
      * @param node
      * @param from
@@ -908,17 +930,11 @@ export default class ChatRoom extends Listenable {
         // make sure we catch all errors coming from any handler
         // otherwise we can remove the presence handler from strophe
         try {
-            let tagHandlers = this.presHandlers[node.tagName];
+            const tagHandlers = this.presHandlers[node.tagName] ?? [];
 
-            if (node.tagName.startsWith('jitsi_participant_')) {
-                tagHandlers = [ this.participantPropertyListener ];
-            }
-
-            if (tagHandlers) {
-                tagHandlers.forEach(handler => {
-                    handler(node, Strophe.getResourceFromJid(from), from);
-                });
-            }
+            tagHandlers.forEach(handler => {
+                handler(node, Strophe.getResourceFromJid(from), from);
+            });
         } catch (e) {
             logger.error(`Error processing:${node.tagName} node.`, e);
         }
@@ -944,6 +960,26 @@ export default class ChatRoom extends Listenable {
 
         this.connection.send(msg);
         this.eventEmitter.emit(XMPPEvents.SENDING_CHAT_MESSAGE, message);
+    }
+
+    /**
+     * Sends a reaction message to the other participants in the conference.
+     * @param {string} reaction - The reaction being sent.
+     * @param {string} messageId - The id of the message being sent.
+     * @param {string} receiverId - The receiver of the message if it is private.
+     */
+    sendReaction(reaction, messageId, receiverId) {
+        // Adds the 'to' attribute depending on if the message is private or not.
+        const msg = receiverId ? $msg({ to: `${this.roomjid}/${receiverId}`,
+            type: 'chat' }) : $msg({ to: this.roomjid,
+            type: 'groupchat' });
+
+        msg.c('reactions', { id: messageId,
+            xmlns: 'urn:xmpp:reactions:0' })
+            .c('reaction', {}, reaction)
+            .up().c('store', { xmlns: 'urn:xmpp:hints' });
+
+        this.connection.send(msg);
     }
 
     /* eslint-disable max-params */
@@ -1098,6 +1134,18 @@ export default class ChatRoom extends Listenable {
 
             // In this case we *do* fire MUC_MEMBER_LEFT for the focus?
             this.eventEmitter.emit(XMPPEvents.MUC_MEMBER_LEFT, from, reason);
+
+            if (member && member.isHiddenDomain && member.features.has(FEATURE_TRANSCRIBER)
+                && this.transcriptionStatus !== JitsiTranscriptionStatus.OFF) {
+                this.transcriptionStatus = JitsiTranscriptionStatus.OFF;
+                this.eventEmitter.emit(
+                    XMPPEvents.TRANSCRIPTION_STATUS_CHANGED,
+                    this.transcriptionStatus,
+                    Strophe.getResourceFromJid(from),
+                    true /* exited abruptly */
+                );
+            }
+
             if (member?.isFocus) {
                 logger.info('Focus has left the room - leaving conference');
                 this.eventEmitter.emit(XMPPEvents.FOCUS_LEFT);
@@ -1127,6 +1175,24 @@ export default class ChatRoom extends Listenable {
 
             return true;
         }
+
+        const reactions = $(msg).find('>[xmlns="urn:xmpp:reactions:0"]>reaction');
+
+        if (reactions.length > 0) {
+            const messageId = $(msg).find('>[xmlns="urn:xmpp:reactions:0"]').attr('id');
+            const reactionList = [];
+
+            reactions.each((_, reactionElem) => {
+                const reaction = $(reactionElem).text();
+
+                reactionList.push(reaction);
+            });
+
+            this.eventEmitter.emit(XMPPEvents.REACTION_RECEIVED, from, reactionList, messageId);
+
+            return true;
+        }
+
 
         const txt = $(msg).find('>body').text();
         const subject = $(msg).find('>subject');
@@ -1192,9 +1258,12 @@ export default class ChatRoom extends Listenable {
         }
 
         if (txt) {
+
+            const messageId = $(msg).attr('id') || uuidv4();
+
             if (type === 'chat') {
                 this.eventEmitter.emit(XMPPEvents.PRIVATE_MESSAGE_RECEIVED,
-                        from, txt, this.myroomjid, stamp);
+                        from, txt, this.myroomjid, stamp, messageId);
             } else if (type === 'groupchat') {
                 const nickEl = $(msg).find('>nick');
                 let nick;
@@ -1207,7 +1276,7 @@ export default class ChatRoom extends Listenable {
                 // informing that this is probably a message from a guest to the conference (visitor)
                 // a message with explicit name set
                 this.eventEmitter.emit(XMPPEvents.MESSAGE_RECEIVED,
-                    from, txt, this.myroomjid, stamp, nick, Boolean(nick));
+                    from, txt, this.myroomjid, stamp, nick, Boolean(nick), messageId);
             }
         }
     }

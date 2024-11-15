@@ -75,18 +75,6 @@ export enum AnalyticsEvents {
     ACTION_JINGLE_TERMINATE = 'terminate',
 
     /**
-     * The "action" value for Jingle events which indicates that a transport-replace
-     * was received.
-     */
-    ACTION_JINGLE_TR_RECEIVED = 'transport-replace.received',
-
-    /**
-     * The "action" value for Jingle events which indicates that a transport-replace
-     * succeeded (TODO: verify/fix the documentation)
-     */
-    ACTION_JINGLE_TR_SUCCESS = 'transport-replace.success',
-
-    /**
      * The "action" value for P2P events which indicates that P2P session initiate message has been rejected by the client
      * because the mandatory requirements were not met.
      */
@@ -211,7 +199,16 @@ export enum AnalyticsEvents {
      *      trackType: the type of the track ('local' or 'remote').
      *      value: TODO: document
      */
-    TRACK_UNMUTED = 'track.unmuted'
+    TRACK_UNMUTED = 'track.unmuted',
+
+    /**
+     * Indicates that the video codec changed for a local track.
+     *
+     * Properties:
+     *      value: the video codec mimeType.
+     *      videoType: the videoType of local track, whether its 'camera' or 'desktop'.
+     */
+    VIDEO_CODEC_CHANGED = 'quality.video-codec-changed',
 }
 
 // exported for backward compatibility
@@ -224,8 +221,6 @@ export const ACTION_JINGLE_SA_TIMEOUT = AnalyticsEvents.ACTION_JINGLE_SA_TIMEOUT
 export const ACTION_JINGLE_SI_RECEIVED = AnalyticsEvents.ACTION_JINGLE_SI_RECEIVED;
 export const ACTION_JINGLE_SI_TIMEOUT = AnalyticsEvents.ACTION_JINGLE_SI_TIMEOUT;
 export const ACTION_JINGLE_TERMINATE = AnalyticsEvents.ACTION_JINGLE_TERMINATE;
-export const ACTION_JINGLE_TR_RECEIVED = AnalyticsEvents.ACTION_JINGLE_TR_RECEIVED;
-export const ACTION_JINGLE_TR_SUCCESS = AnalyticsEvents.ACTION_JINGLE_TR_SUCCESS;
 export const ACTION_P2P_DECLINED = AnalyticsEvents.ACTION_P2P_DECLINED;
 export const ACTION_P2P_ESTABLISHED = AnalyticsEvents.ACTION_P2P_ESTABLISHED;
 export const ACTION_P2P_FAILED = AnalyticsEvents.ACTION_P2P_FAILED;
@@ -238,6 +233,7 @@ export const ICE_ESTABLISHMENT_DURATION_DIFF = AnalyticsEvents.ICE_ESTABLISHMENT
 export const ICE_STATE_CHANGED = AnalyticsEvents.ICE_STATE_CHANGED;
 export const NO_BYTES_SENT = AnalyticsEvents.NO_BYTES_SENT;
 export const TRACK_UNMUTED = AnalyticsEvents.TRACK_UNMUTED;
+export const VIDEO_CODEC_CHANGED = AnalyticsEvents.VIDEO_CODEC_CHANGED;
 
 /**
  * Creates an operational event which indicates that we have received a

@@ -35,8 +35,12 @@ import * as E2ePingEvents from './service/e2eping/E2ePingEvents';
 import { createGetUserMediaEvent } from './service/statistics/AnalyticsEvents';
 import *  as RTCStatsEvents from './modules/RTCStats/RTCStatsEvents';
 import { VideoType } from './service/RTC/VideoType';
+import runPreCallTest, { IceServer, PreCallResult } from './modules/statistics/PreCallTest';
 
 const logger = Logger.getLogger(__filename);
+
+// Settin the default log levels to info early so that we avoid overriding a log level set externally.
+Logger.setLogLevel(Logger.levels.INFO);
 
 /**
  * Indicates whether GUM has been executed or not.
@@ -136,8 +140,6 @@ export default {
     mediaDevices: JitsiMediaDevices as unknown,
     analytics: Statistics.analytics as unknown,
     init(options: IJitsiMeetJSOptions = {}) {
-        Logger.setLogLevel(Logger.levels.INFO);
-
         // @ts-ignore
         logger.info(`This appears to be ${browser.getName()}, ver: ${browser.getVersion()}`);
 
@@ -474,6 +476,16 @@ export default {
      */
     setNetworkInfo({ isOnline }) {
         NetworkInfo.updateNetworkInfo({ isOnline });
+    },
+
+    /**
+     * Run a pre-call test to check the network conditions.
+     * 
+     * @param {IceServer} iceServers  - The ICE servers to use for the test,
+     * @returns {Promise<PreCallResult | any>} - A Promise that resolves with the test results or rejects with an error message.
+     */
+    runPreCallTest(iceServers) {
+        return runPreCallTest(iceServers);
     },
 
     /**

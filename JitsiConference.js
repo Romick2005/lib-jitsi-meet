@@ -1,6 +1,6 @@
 import { getLogger } from '@jitsi/logger';
 import $ from 'jquery';
-import isEqual from 'lodash.isequal';
+import { isEqual } from 'lodash-es';
 import { Strophe } from 'strophe.js';
 
 import * as JitsiConferenceErrors from './JitsiConferenceErrors';
@@ -11,7 +11,6 @@ import JitsiTrackError from './JitsiTrackError';
 import * as JitsiTrackErrors from './JitsiTrackErrors';
 import * as JitsiTrackEvents from './JitsiTrackEvents';
 import authenticateAndUpgradeRole from './authenticateAndUpgradeRole';
-import { CodecSelection } from './modules/RTC/CodecSelection';
 import RTC from './modules/RTC/RTC';
 import { SS_DEFAULT_FRAME_RATE } from './modules/RTC/ScreenObtainer';
 import browser from './modules/browser';
@@ -28,11 +27,9 @@ import E2ePing from './modules/e2eping/e2eping';
 import Jvb121EventGenerator from './modules/event/Jvb121EventGenerator';
 import FeatureFlags from './modules/flags/FeatureFlags';
 import { LiteModeContext } from './modules/litemode/LiteModeContext';
-import ReceiveVideoController from './modules/qualitycontrol/ReceiveVideoController';
-import SendVideoController from './modules/qualitycontrol/SendVideoController';
+import { QualityController } from './modules/qualitycontrol/QualityController';
 import RecordingManager from './modules/recording/RecordingManager';
 import Settings from './modules/settings/Settings';
-import AudioOutputProblemDetector from './modules/statistics/AudioOutputProblemDetector';
 import AvgRTPStatsReporter from './modules/statistics/AvgRTPStatsReporter';
 import LocalStatsCollector from './modules/statistics/LocalStatsCollector';
 import SpeakerStatsCollector from './modules/statistics/SpeakerStatsCollector';
@@ -109,8 +106,6 @@ function _getCodecMimeType(codec) {
  * @param {number} [options.config.avgRtpStatsN=15] how many samples are to be
  * collected by {@link AvgRTPStatsReporter}, before arithmetic mean is
  * calculated and submitted to the analytics module.
- * @param {boolean} [options.config.enableIceRestart=false] - enables the ICE
- * restart logic.
  * @param {boolean} [options.config.p2p.enabled] when set to <tt>true</tt>
  * the peer to peer mode will be enabled. It means that when there are only 2
  * participants in the conference an attempt to make direct connection will be
@@ -222,14 +217,6 @@ export default function JitsiConference(options) {
      */
     this.avgRtpStatsReporter
         = new AvgRTPStatsReporter(this, options.config.avgRtpStatsN || 15);
-
-    /**
-     * Detects issues with the audio of remote participants.
-     * @type {AudioOutputProblemDetector}
-     */
-    if (!options.config.disableAudioLevels) {
-        this._audioOutputProblemDetector = new AudioOutputProblemDetector(this);
-    }
 
     /**
      * Indicates whether the connection is interrupted or not.
@@ -383,25 +370,6 @@ JitsiConference.prototype._init = function(options = {}) {
 
     const { config } = this.options;
 
-    // Get the codec preference settings from config.js.
-    const codecSettings = {
-        jvb: {
-            preferenceOrder: browser.isMobileDevice() && config.videoQuality?.mobileCodecPreferenceOrder
-                ? config.videoQuality.mobileCodecPreferenceOrder
-                : config.videoQuality?.codecPreferenceOrder,
-            disabledCodec: _getCodecMimeType(config.videoQuality?.disabledCodec),
-            preferredCodec: _getCodecMimeType(config.videoQuality?.preferredCodec)
-        },
-        p2p: {
-            preferenceOrder: browser.isMobileDevice() && config.p2p?.mobileCodecPreferenceOrder
-                ? config.p2p.mobileCodecPreferenceOrder
-                : config.p2p?.codecPreferenceOrder,
-            disabledCodec: _getCodecMimeType(config.p2p?.disabledCodec),
-            preferredCodec: _getCodecMimeType(config.p2p?.preferredCodec)
-        }
-    };
-
-    this.codecSelection = new CodecSelection(this, codecSettings);
     this._statsCurrentId = config.statisticsId ? config.statisticsId : Settings.callStatsUserName;
     this.room = this.xmpp.createRoom(
         this.options.name, {
@@ -469,8 +437,33 @@ JitsiConference.prototype._init = function(options = {}) {
         this._registerRtcListeners(this.rtc);
     }
 
-    this.receiveVideoController = new ReceiveVideoController(this, this.rtc);
-    this.sendVideoController = new SendVideoController(this, this.rtc);
+    // Get the codec preference settings from config.js.
+    const qualityOptions = {
+        enableAdaptiveMode: config.videoQuality?.enableAdaptiveMode,
+        lastNRampupTime: config.testing?.lastNRampupTime ?? 60000,
+        jvb: {
+            preferenceOrder: browser.isMobileDevice()
+                ? config.videoQuality?.mobileCodecPreferenceOrder
+                : config.videoQuality?.codecPreferenceOrder,
+            disabledCodec: _getCodecMimeType(config.videoQuality?.disabledCodec),
+            preferredCodec: _getCodecMimeType(config.videoQuality?.preferredCodec),
+            screenshareCodec: browser.isMobileDevice()
+                ? _getCodecMimeType(config.videoQuality?.mobileScreenshareCodec)
+                : _getCodecMimeType(config.videoQuality?.screenshareCodec)
+        },
+        p2p: {
+            preferenceOrder: browser.isMobileDevice()
+                ? config.p2p?.mobileCodecPreferenceOrder
+                : config.p2p?.codecPreferenceOrder,
+            disabledCodec: _getCodecMimeType(config.p2p?.disabledCodec),
+            preferredCodec: _getCodecMimeType(config.p2p?.preferredCodec),
+            screenshareCodec: browser.isMobileDevice()
+                ? _getCodecMimeType(config.p2p?.mobileScreenshareCodec)
+                : _getCodecMimeType(config.p2p?.screenshareCodec)
+        }
+    };
+
+    this.qualityController = new QualityController(this, qualityOptions);
 
     if (!this.statistics) {
         this.statistics = new Statistics(this, {
@@ -568,7 +561,7 @@ JitsiConference.prototype._init = function(options = {}) {
     }
 
     // Publish the codec preference to presence.
-    this.setLocalParticipantProperty('codecList', this.codecSelection.getCodecPreferenceList('jvb'));
+    this.setLocalParticipantProperty('codecList', this.qualityController.codecController.getCodecPreferenceList('jvb'));
 
     // Set transcription language presence extension.
     // In case the language config is undefined or has the default value that the transcriber uses
@@ -645,11 +638,6 @@ JitsiConference.prototype.leave = async function(reason) {
         this.avgRtpStatsReporter = null;
     }
 
-    if (this._audioOutputProblemDetector) {
-        this._audioOutputProblemDetector.dispose();
-        this._audioOutputProblemDetector = null;
-    }
-
     if (this.e2eping) {
         this.e2eping.stop();
         this.e2eping = null;
@@ -681,7 +669,14 @@ JitsiConference.prototype.leave = async function(reason) {
 
     // Leave the conference. If this.room == null we are calling second time leave().
     if (!this.room) {
-        throw new Error('You have already left the conference');
+        return;
+    }
+
+    // let's check is this breakout
+    if (reason === 'switch_room' && this.getBreakoutRooms()?.isBreakoutRoom()) {
+        const mJid = this.getBreakoutRooms().getMainRoomJid();
+
+        this.xmpp.connection._breakoutMovingToMain = mJid;
     }
 
     const room = this.room;
@@ -981,6 +976,18 @@ JitsiConference.prototype.sendTextMessage = function(message, elementName = 'bod
 };
 
 /**
+ * Sends a reaction to the other participants in the conference
+ * @param reaction the reaction.
+ * @param messageId the ID of the message to attach the reaction to.
+ * @param receiverId the intended recipient, if the message is private.
+ */
+JitsiConference.prototype.sendReaction = function(reaction, messageId, receiverId) {
+    if (this.room) {
+        this.room.sendReaction(reaction, messageId, receiverId);
+    }
+};
+
+/**
  * Send private text message to another participant of the conference
  * @param id the id of the participant to send a private message.
  * @param message the text message.
@@ -1043,6 +1050,19 @@ JitsiConference.prototype.setDisplayName = function(name) {
             this.room.removeFromPresence(nickKey);
             this.room.sendPresence();
         }
+    }
+};
+
+/**
+ * Set join without audio
+ * @param silent whether user joined without audio
+ */
+JitsiConference.prototype.setIsSilent = function(silent) {
+    if (this.room) {
+        this.room.addOrReplaceInPresence('silent', {
+            attributes: { xmlns: 'http://jitsi.org/protocol/silent' },
+            value: silent
+        }) && this.room.sendPresence();
     }
 };
 
@@ -1557,7 +1577,7 @@ JitsiConference.prototype.unlock = function() {
  * @returns {number}
  */
 JitsiConference.prototype.getLastN = function() {
-    return this.receiveVideoController.getLastN();
+    return this.qualityController.receiveVideoController.getLastN();
 };
 
 /**
@@ -1585,7 +1605,7 @@ JitsiConference.prototype.setLastN = function(lastN) {
     if (n < -1) {
         throw new RangeError('lastN cannot be smaller than -1');
     }
-    this.receiveVideoController.setLastN(n);
+    this.qualityController.receiveVideoController.setLastN(n);
 
     // If the P2P session is not fully established yet, we wait until it gets established.
     if (this.p2pJingleSession) {
@@ -1926,14 +1946,17 @@ JitsiConference.prototype.onMemberKicked = function(
         kickedParticipantId,
         reason,
         isReplaceParticipant) {
-    // This check which be true when we kick someone else. With the introduction of lobby
-    // the ChatRoom KICKED event is now also emitted for ourselves (the kicker) so we want to
-    // avoid emitting an event where `undefined` kicked someone.
-    if (actorId === this.myUserId()) {
-        return;
-    }
+    let actorParticipant;
 
-    const actorParticipant = this.participants.get(actorId);
+    if (actorId === this.myUserId()) {
+        // When we kick someone we also want to send the PARTICIPANT_KICKED event, but there is no
+        // JitsiParticipant object for ourselves so create a minimum fake one.
+        actorParticipant = {
+            getId: () => actorId
+        };
+    } else {
+        actorParticipant = this.participants.get(actorId);
+    }
 
     if (isSelfPresence) {
         this.leave().finally(() => this.xmpp.disconnect());
@@ -1989,6 +2012,21 @@ JitsiConference.prototype.onDisplayNameChanged = function(jid, displayName) {
         JitsiConferenceEvents.DISPLAY_NAME_CHANGED,
         id,
         displayName);
+};
+
+JitsiConference.prototype.onSilentStatusChanged = function(jid, isSilent) {
+    const id = Strophe.getResourceFromJid(jid);
+    const participant = this.getParticipantById(id);
+
+    if (!participant) {
+        return;
+    }
+
+    participant.setIsSilent(isSilent);
+    this.eventEmitter.emit(
+        JitsiConferenceEvents.SILENT_STATUS_CHANGED,
+        id,
+        isSilent);
 };
 
 /**
@@ -2198,7 +2236,8 @@ JitsiConference.prototype._acceptJvbIncomingCall = function(jingleSession, jingl
                 ...this.options.config,
                 codecSettings: {
                     mediaType: MediaType.VIDEO,
-                    codecList: this.codecSelection.getCodecPreferenceList('jvb')
+                    codecList: this.qualityController.codecController.getCodecPreferenceList('jvb'),
+                    screenshareCodec: this.qualityController.codecController.getScreenshareCodec('jvb')
                 },
                 enableInsertableStreams: this.isE2EEEnabled() || FeatureFlags.isRunInLiteModeEnabled()
             });
@@ -2256,7 +2295,7 @@ JitsiConference.prototype._acceptJvbIncomingCall = function(jingleSession, jingl
  */
 JitsiConference.prototype._setBridgeChannel = function(offerIq, pc) {
     const ignoreDomain = this.connection?.options?.bridgeChannel?.ignoreDomain;
-    const preferSctp = this.connection?.options?.bridgeChannel?.preferSctp ?? false;
+    const preferSctp = this.connection?.options?.bridgeChannel?.preferSctp ?? true;
     const sctpOffered = $(offerIq).find('>content[name="data"]')
         .first().length === 1;
     let wsUrl = null;
@@ -2908,7 +2947,8 @@ JitsiConference.prototype._acceptP2PIncomingCall = function(jingleSession, jingl
             ...this.options.config,
             codecSettings: {
                 mediaType: MediaType.VIDEO,
-                codecList: this.codecSelection.getCodecPreferenceList('p2p')
+                codecList: this.qualityController.codecController.getCodecPreferenceList('p2p'),
+                screenshareCodec: this.qualityController.codecController.getScreenshareCodec('p2p')
             },
             enableInsertableStreams: this.isE2EEEnabled() || FeatureFlags.isRunInLiteModeEnabled()
         });
@@ -3263,7 +3303,8 @@ JitsiConference.prototype._startP2PSession = function(remoteJid) {
             ...this.options.config,
             codecSettings: {
                 mediaType: MediaType.VIDEO,
-                codecList: this.codecSelection.getCodecPreferenceList('p2p')
+                codecList: this.qualityController.codecController.getCodecPreferenceList('p2p'),
+                screenshareCodec: this.qualityController.codecController.getScreenshareCodec('p2p')
             },
             enableInsertableStreams: this.isE2EEEnabled() || FeatureFlags.isRunInLiteModeEnabled()
         });
@@ -3665,7 +3706,7 @@ JitsiConference.prototype.sendFaceLandmarks = function(payload) {
  * Where A, B and C are source-names of the remote tracks that are being requested from the bridge.
  */
 JitsiConference.prototype.setReceiverConstraints = function(videoConstraints) {
-    this.receiveVideoController.setReceiverConstraints(videoConstraints);
+    this.qualityController.receiveVideoController.setReceiverConstraints(videoConstraints);
 };
 
 /**
@@ -3674,7 +3715,7 @@ JitsiConference.prototype.setReceiverConstraints = function(videoConstraints) {
  * @param {Number} assumedBandwidthBps - The bandwidth value expressed in bits per second.
  */
 JitsiConference.prototype.setAssumedBandwidthBps = function(assumedBandwidthBps) {
-    this.receiveVideoController.setAssumedBandwidthBps(assumedBandwidthBps);
+    this.qualityController.receiveVideoController.setAssumedBandwidthBps(assumedBandwidthBps);
 };
 
 /**
@@ -3686,7 +3727,7 @@ JitsiConference.prototype.setAssumedBandwidthBps = function(assumedBandwidthBps)
  * @returns {void}
  */
 JitsiConference.prototype.setReceiverVideoConstraint = function(maxFrameHeight) {
-    this.receiveVideoController.setPreferredReceiveMaxFrameHeight(maxFrameHeight);
+    this.qualityController.receiveVideoController.setPreferredReceiveMaxFrameHeight(maxFrameHeight);
 };
 
 /**
@@ -3697,7 +3738,7 @@ JitsiConference.prototype.setReceiverVideoConstraint = function(maxFrameHeight) 
  * successful and rejected otherwise.
  */
 JitsiConference.prototype.setSenderVideoConstraint = function(maxFrameHeight) {
-    return this.sendVideoController.setPreferredSendMaxFrameHeight(maxFrameHeight);
+    return this.qualityController.sendVideoController.setPreferredSendMaxFrameHeight(maxFrameHeight);
 };
 
 /**

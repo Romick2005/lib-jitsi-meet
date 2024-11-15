@@ -1,9 +1,10 @@
 
 import { getLogger } from '@jitsi/logger';
 
-import * as JitsiConferenceEvents from '../../JitsiConferenceEvents';
 import { CodecMimeType } from '../../service/RTC/CodecMimeType';
 import { MediaType } from '../../service/RTC/MediaType';
+import { VIDEO_CODECS_BY_COMPLEXITY } from '../../service/RTC/StandardVideoQualitySettings';
+import { VideoType } from '../../service/RTC/VideoType';
 import browser from '../browser';
 
 const logger = getLogger(__filename);
@@ -30,14 +31,16 @@ export class CodecSelection {
      * @param {string} options.p2p settings (codec list, preferred and disabled) for the p2p connection.
      */
     constructor(conference, options) {
-        this.conference = conference;
-        this.options = options;
         this.codecPreferenceOrder = {};
+        this.conference = conference;
+        this.encodeTimeStats = new Map();
+        this.options = options;
+        this.screenshareCodec = {};
         this.visitorCodecs = [];
 
         for (const connectionType of Object.keys(options)) {
             // eslint-disable-next-line prefer-const
-            let { disabledCodec, preferredCodec, preferenceOrder } = options[connectionType];
+            let { disabledCodec, preferredCodec, preferenceOrder, screenshareCodec } = options[connectionType];
             const supportedCodecs = new Set(this._getSupportedVideoCodecs(connectionType));
 
             // Default preference codec order when no codec preferences are set in config.js
@@ -89,20 +92,12 @@ export class CodecSelection {
 
             logger.info(`Codec preference order for ${connectionType} connection is ${selectedOrder}`);
             this.codecPreferenceOrder[connectionType] = selectedOrder;
-        }
 
-        this.conference.on(
-            JitsiConferenceEvents._MEDIA_SESSION_STARTED,
-            session => this._selectPreferredCodec(session));
-        this.conference.on(
-            JitsiConferenceEvents.CONFERENCE_VISITOR_CODECS_CHANGED,
-            codecList => this._updateVisitorCodecs(codecList));
-        this.conference.on(
-            JitsiConferenceEvents.USER_JOINED,
-            () => this._selectPreferredCodec());
-        this.conference.on(
-            JitsiConferenceEvents.USER_LEFT,
-            () => this._selectPreferredCodec());
+            // Set the preferred screenshare codec.
+            if (screenshareCodec && supportedCodecs.has(screenshareCodec.toLowerCase())) {
+                this.screenshareCodec[connectionType] = screenshareCodec.toLowerCase();
+            }
+        }
     }
 
     /**
@@ -128,24 +123,42 @@ export class CodecSelection {
     }
 
     /**
+     * Returns the current codec preference order for the given connection type.
+     *
+     * @param {String} connectionType The media connection type, 'p2p' or 'jvb'.
+     * @returns {Array<string>}
+     */
+    getCodecPreferenceList(connectionType) {
+        return this.codecPreferenceOrder[connectionType];
+    }
+
+    /**
+     * Returns the preferred screenshare codec for the given connection type.
+     *
+     * @param {String} connectionType The media connection type, 'p2p' or 'jvb'.
+     * @returns CodecMimeType
+     */
+    getScreenshareCodec(connectionType) {
+        return this.screenshareCodec[connectionType];
+    }
+
+    /**
      * Sets the codec on the media session based on the codec preference order configured in config.js and the supported
      * codecs published by the remote participants in their presence.
      *
      * @param {JingleSessionPC} mediaSession session for which the codec selection has to be made.
      */
-    _selectPreferredCodec(mediaSession) {
+    selectPreferredCodec(mediaSession) {
         const session = mediaSession ? mediaSession : this.conference.jvbJingleSession;
 
         if (!session) {
             return;
         }
-        const currentCodecOrder = session.peerconnection.getConfiguredVideoCodecs();
-        const isJvbSession = session === this.conference.jvbJingleSession;
 
-        let localPreferredCodecOrder = isJvbSession ? this.codecPreferenceOrder.jvb : this.codecPreferenceOrder.p2p;
+        let localPreferredCodecOrder = this.codecPreferenceOrder.jvb;
 
         // E2EE is curently supported only for VP8 codec.
-        if (this.conference.isE2EEEnabled() && isJvbSession) {
+        if (this.conference.isE2EEEnabled()) {
             localPreferredCodecOrder = [ CodecMimeType.VP8 ];
         }
 
@@ -168,17 +181,13 @@ export class CodecSelection {
         const selectedCodecOrder = localPreferredCodecOrder.reduce((acc, localCodec) => {
             let codecNotSupportedByRemote = false;
 
-            // Ignore remote codecs for p2p since only the JVB codec preferences are published in presence.
-            // For p2p, we rely on the codec order present in the remote offer/answer.
-            if (!session.isP2P) {
-                // Remove any codecs that are not supported by any of the remote endpoints. The order of the supported
-                // codecs locally however will remain the same since we want to support asymmetric codecs.
-                for (const remoteCodecs of remoteCodecsPerParticipant) {
-                    // Ignore remote participants that do not publish codec preference in presence (transcriber).
-                    if (remoteCodecs.length) {
-                        codecNotSupportedByRemote = codecNotSupportedByRemote
-                        || !remoteCodecs.find(participantCodec => participantCodec === localCodec);
-                    }
+            // Remove any codecs that are not supported by any of the remote endpoints. The order of the supported
+            // codecs locally however will remain the same since we want to support asymmetric codecs.
+            for (const remoteCodecs of remoteCodecsPerParticipant) {
+                // Ignore remote participants that do not publish codec preference in presence (transcriber).
+                if (remoteCodecs.length) {
+                    codecNotSupportedByRemote = codecNotSupportedByRemote
+                    || !remoteCodecs.find(participantCodec => participantCodec === localCodec);
                 }
             }
 
@@ -195,10 +204,46 @@ export class CodecSelection {
             return;
         }
 
-        // Reconfigure the codecs on the media session.
-        if (!selectedCodecOrder.every((val, index) => val === currentCodecOrder[index])) {
-            session.setVideoCodecs(selectedCodecOrder);
+        session.setVideoCodecs(selectedCodecOrder, this.screenshareCodec?.jvb);
+    }
+
+    /**
+     * Changes the codec preference order.
+     *
+     * @param {JitsiLocalTrack} localTrack - The local video track.
+     * @param {CodecMimeType} codec - The codec used for encoding the given local video track.
+     * @returns boolean - Returns true if the codec order has been updated, false otherwise.
+     */
+    changeCodecPreferenceOrder(localTrack, codec) {
+        const session = this.conference.getActiveMediaSession();
+        const connectionType = session.isP2P ? 'p2p' : 'jvb';
+        const codecOrder = this.codecPreferenceOrder[connectionType];
+        const videoType = localTrack.getVideoType();
+        const codecsByVideoType = VIDEO_CODECS_BY_COMPLEXITY[videoType]
+            .filter(val => Boolean(codecOrder.find(supportedCodec => supportedCodec === val)));
+        const codecIndex = codecsByVideoType.findIndex(val => val === codec.toLowerCase());
+
+        // Do nothing if we are using the lowest complexity codec already.
+        if (codecIndex === codecsByVideoType.length - 1) {
+            return false;
         }
+
+        const newCodec = codecsByVideoType[codecIndex + 1];
+
+        if (videoType === VideoType.CAMERA) {
+            const idx = codecOrder.findIndex(val => val === newCodec);
+
+            codecOrder.splice(idx, 1);
+            codecOrder.unshift(newCodec);
+            logger.info(`QualityController - switching camera codec to ${newCodec} because of cpu restriction`);
+        } else {
+            this.screenshareCodec[connectionType] = newCodec;
+            logger.info(`QualityController - switching screenshare codec to ${newCodec} because of cpu restriction`);
+        }
+
+        this.selectPreferredCodec(session);
+
+        return true;
     }
 
     /**
@@ -207,22 +252,12 @@ export class CodecSelection {
      * @param {Array} codecList - visitor codecs.
      * @returns {void}
      */
-    _updateVisitorCodecs(codecList) {
+    updateVisitorCodecs(codecList) {
         if (this.visitorCodecs === codecList) {
             return;
         }
 
         this.visitorCodecs = codecList;
-        this._selectPreferredCodec();
-    }
-
-    /**
-     * Returns the current codec preference order for the given connection type.
-     *
-     * @param {String} connectionType The media connection type, 'p2p' or 'jvb'.
-     * @returns {Array<string>}
-     */
-    getCodecPreferenceList(connectionType) {
-        return this.codecPreferenceOrder[connectionType];
+        this.selectPreferredCodec();
     }
 }

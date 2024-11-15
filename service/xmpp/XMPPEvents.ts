@@ -88,18 +88,6 @@ export enum XMPPEvents {
     GRACEFUL_SHUTDOWN = 'xmpp.graceful_shutdown',
 
     /**
-     * Event fired when 'transport-replace' Jingle message has been received,
-     * before the new offer is set on the PeerConnection.
-     */
-    ICE_RESTARTING = 'rtc.ice_restarting',
-
-    /**
-     * Event fired after the 'transport-replace' message has been processed
-     * and the new offer has been set successfully.
-     */
-    ICE_RESTART_SUCCESS = 'rtc.ice_restart_success',
-
-    /**
      * Designates an event indicating that we were kicked from the XMPP MUC.
      * @param {boolean} isSelfPresence - whether it is for local participant
      * or another participant.
@@ -121,6 +109,10 @@ export enum XMPPEvents {
     // Designates an event indicating that an XMPP message in the MUC was
     // received.
     MESSAGE_RECEIVED = 'xmpp.message_received',
+
+    // Designates an event indicating that a reaction XMPP message in the MUC
+    // was received.
+    REACTION_RECEIVED = "xmpp.reaction_received",
 
     // Designates an event indicating that an invite XMPP message in the MUC was
     // received.
@@ -265,6 +257,11 @@ export enum XMPPEvents {
      * packets means that most likely it has never seen our IQ.
      */
     SESSION_ACCEPT_TIMEOUT = 'xmpp.session_accept_timeout',
+
+    /**
+     * Event fired when participant joins a meeting without audio.
+     */
+    SILENT_STATUS_CHANGED = 'xmpp.silent_status_changed',
 
     /**
      * Event fired after successful sending of jingle source-add.

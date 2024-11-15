@@ -4,6 +4,9 @@ import $ from 'jquery';
 import { $build } from 'strophe.js';
 
 import { MediaType } from '../../service/RTC/MediaType';
+import { SSRC_GROUP_SEMANTICS } from '../../service/RTC/StandardVideoQualitySettings';
+import { VideoType } from '../../service/RTC/VideoType';
+import { XEP } from '../../service/xmpp/XMPPExtensioProtocols';
 
 const logger = getLogger(__filename);
 
@@ -11,13 +14,23 @@ const logger = getLogger(__filename);
  * Creates a "source" XML element for the source described in compact JSON format in [sourceCompactJson].
  * @param {*} owner the endpoint ID of the owner of the source.
  * @param {*} sourceCompactJson the compact JSON representation of the source.
+ * @param {boolean} isVideo whether the source is a video source
  * @returns the created "source" XML element.
  */
-function _createSourceExtension(owner, sourceCompactJson) {
+function _createSourceExtension(owner, sourceCompactJson, isVideo = false) {
+    let videoType = sourceCompactJson.v ? VideoType.DESKTOP : undefined;
+
+    // If the video type is not specified, it is assumed to be a camera for video sources.
+    // Jicofo adds the video type only for desktop sharing sources.
+    if (!videoType && isVideo) {
+        videoType = VideoType.CAMERA;
+    }
+
     const node = $build('source', {
-        xmlns: 'urn:xmpp:jingle:apps:rtp:ssma:0',
+        xmlns: XEP.SOURCE_ATTRIBUTES,
         ssrc: sourceCompactJson.s,
-        name: sourceCompactJson.n
+        name: sourceCompactJson.n,
+        videoType
     });
 
     if (sourceCompactJson.m) {
@@ -41,13 +54,13 @@ function _createSourceExtension(owner, sourceCompactJson) {
  */
 function _createSsrcGroupExtension(ssrcGroupCompactJson) {
     const node = $build('ssrc-group', {
-        xmlns: 'urn:xmpp:jingle:apps:rtp:ssma:0',
+        xmlns: XEP.SOURCE_ATTRIBUTES,
         semantics: _getSemantics(ssrcGroupCompactJson[0])
     });
 
     for (let i = 1; i < ssrcGroupCompactJson.length; i++) {
         node.c('source', {
-            xmlns: 'urn:xmpp:jingle:apps:rtp:ssma:0',
+            xmlns: XEP.SOURCE_ATTRIBUTES,
             ssrc: ssrcGroupCompactJson[i]
         }).up();
     }
@@ -83,7 +96,7 @@ function _getOrCreateRtpDescription(iq, mediaType) {
         description = description[0];
     } else {
         description = $build('description', {
-            xmlns: 'urn:xmpp:jingle:apps:rtp:1',
+            xmlns: XEP.RTP_MEDIA,
             media: mediaType
         }).node;
         content.appendChild(description);
@@ -100,9 +113,9 @@ function _getOrCreateRtpDescription(iq, mediaType) {
  */
 function _getSemantics(str) {
     if (str === 'f') {
-        return 'FID';
+        return SSRC_GROUP_SEMANTICS.FID;
     } else if (str === 's') {
-        return 'SIM';
+        return SSRC_GROUP_SEMANTICS.SIM;
     }
 
     return null;
@@ -155,7 +168,7 @@ export function expandSourcesFromJson(iq, jsonMessageXml) {
 
             if (videoSources?.length) {
                 for (let i = 0; i < videoSources.length; i++) {
-                    videoRtpDescription.appendChild(_createSourceExtension(owner, videoSources[i]));
+                    videoRtpDescription.appendChild(_createSourceExtension(owner, videoSources[i], true));
                     ssrcs.push(videoSources[i]?.s);
                 }
             }

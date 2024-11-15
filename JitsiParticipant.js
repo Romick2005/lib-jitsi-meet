@@ -26,8 +26,9 @@ export default class JitsiParticipant {
      * @param {object} identity - the xmpp identity
      * @param {boolean?} isReplacing - whether this is a participant replacing another into the meeting.
      * @param {boolean?} isReplaced - whether this is a participant to be kicked and replaced into the meeting.
+     * @param {boolean?} isSilent - whether participant has joined without audio
      */
-    constructor(jid, conference, displayName, hidden, statsID, status, identity, isReplacing, isReplaced) {
+    constructor(jid, conference, displayName, hidden, statsID, status, identity, isReplacing, isReplaced, isSilent) {
         this._jid = jid;
         this._id = Strophe.getResourceFromJid(jid);
         this._conference = conference;
@@ -38,10 +39,11 @@ export default class JitsiParticipant {
         this._status = status;
         this._hidden = hidden;
         this._statsID = statsID;
-        this._properties = {};
+        this._properties = new Map();
         this._identity = identity;
         this._isReplacing = isReplacing;
         this._isReplaced = isReplaced;
+        this._isSilent = isSilent;
         this._features = new Set();
 
         /**
@@ -169,7 +171,7 @@ export default class JitsiParticipant {
      * Gets the value of a property of this participant.
      */
     getProperty(name) {
-        return this._properties[name];
+        return this._properties.get(name);
     }
 
     /**
@@ -277,6 +279,13 @@ export default class JitsiParticipant {
     }
 
     /**
+     * @returns {Boolean} Whether this participant has joined without audio.
+     */
+    isSilent() {
+        return this._isSilent;
+    }
+
+    /**
      * @returns {Boolean} Whether this participant has muted their video.
      */
     isVideoMuted() {
@@ -324,16 +333,24 @@ export default class JitsiParticipant {
     }
 
     /**
+     * Sets whether participant has joined without audio.
+     * @param {boolean} newIsSilent - whether is silent.
+     */
+    setIsSilent(newIsSilent) {
+        this._isSilent = newIsSilent;
+    }
+
+    /**
      * Sets the value of a property of this participant, and fires an event if
      * the value has changed.
      * @name the name of the property.
      * @value the value to set.
      */
     setProperty(name, value) {
-        const oldValue = this._properties[name];
+        const oldValue = this._properties.get(name);
 
         if (value !== oldValue) {
-            this._properties[name] = value;
+            this._properties.set(name, value);
             this._conference.eventEmitter.emit(
                 JitsiConferenceEvents.PARTICIPANT_PROPERTY_CHANGED,
                 this,

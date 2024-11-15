@@ -42,19 +42,6 @@ JitsiConferenceEventManager.prototype.setupChatRoomListeners = function() {
     this.chatRoomForwarder = new EventEmitterForwarder(chatRoom,
         this.conference.eventEmitter);
 
-    chatRoom.addListener(XMPPEvents.ICE_RESTARTING, jingleSession => {
-        if (!jingleSession.isP2P) {
-            // If using DataChannel as bridge channel, it must be closed
-            // before ICE restart, otherwise Chrome will not trigger "opened"
-            // event for the channel established with the new bridge.
-            // TODO: This may be bypassed when using a WebSocket as bridge
-            // channel.
-            conference.rtc.closeBridgeChannel();
-        }
-
-        // else: there are no DataChannels in P2P session (at least for now)
-    });
-
     chatRoom.addListener(XMPPEvents.PARTICIPANT_FEATURES_CHANGED, (from, features) => {
         const participant = conference.getParticipantById(Strophe.getResourceFromJid(from));
 
@@ -63,17 +50,6 @@ JitsiConferenceEventManager.prototype.setupChatRoomListeners = function() {
             conference.eventEmitter.emit(JitsiConferenceEvents.PARTCIPANT_FEATURES_CHANGED, participant);
         }
     });
-
-    chatRoom.addListener(
-        XMPPEvents.ICE_RESTART_SUCCESS,
-        (jingleSession, offerIq) => {
-            // The JVB data chanel needs to be reopened in case the conference
-            // has been moved to a new bridge.
-            !jingleSession.isP2P
-                && conference._setBridgeChannel(
-                    offerIq, jingleSession.peerconnection);
-        });
-
 
     chatRoom.addListener(XMPPEvents.AUDIO_MUTED_BY_FOCUS,
         actor => {
@@ -299,16 +275,14 @@ JitsiConferenceEventManager.prototype.setupChatRoomListeners = function() {
     this.chatRoomForwarder.forward(XMPPEvents.PHONE_NUMBER_CHANGED,
         JitsiConferenceEvents.PHONE_NUMBER_CHANGED);
 
-    chatRoom.setParticipantPropertyListener((node, from) => {
-        const participant = conference.getParticipantById(from);
+    chatRoom.setParticipantPropertyListener((id, prop, value) => {
+        const participant = conference.getParticipantById(id);
 
         if (!participant) {
             return;
         }
 
-        participant.setProperty(
-            node.tagName.substring('jitsi_participant_'.length),
-            node.value);
+        participant.setProperty(prop, value);
     });
 
     chatRoom.addListener(XMPPEvents.KICKED,
@@ -345,6 +319,9 @@ JitsiConferenceEventManager.prototype.setupChatRoomListeners = function() {
     chatRoom.addListener(XMPPEvents.DISPLAY_NAME_CHANGED,
         conference.onDisplayNameChanged.bind(conference));
 
+    chatRoom.addListener(XMPPEvents.SILENT_STATUS_CHANGED,
+        conference.onSilentStatusChanged.bind(conference));
+
     chatRoom.addListener(XMPPEvents.LOCAL_ROLE_CHANGED, role => {
         conference.onLocalRoleChanged(role);
     });
@@ -365,24 +342,35 @@ JitsiConferenceEventManager.prototype.setupChatRoomListeners = function() {
         XMPPEvents.MESSAGE_RECEIVED,
 
         // eslint-disable-next-line max-params
-        (jid, txt, myJid, ts, nick, isGuest) => {
-            const id = Strophe.getResourceFromJid(jid);
+        (jid, txt, myJid, ts, nick, isGuest, messageId) => {
+            const participantId = Strophe.getResourceFromJid(jid);
 
             conference.eventEmitter.emit(
                 JitsiConferenceEvents.MESSAGE_RECEIVED,
-                id, txt, ts, nick, isGuest);
+                participantId, txt, ts, nick, isGuest, messageId);
+        });
+
+    chatRoom.addListener(
+        XMPPEvents.REACTION_RECEIVED,
+
+        (jid, reactionList, messageId) => {
+            const participantId = Strophe.getResourceFromJid(jid);
+
+            conference.eventEmitter.emit(
+                JitsiConferenceEvents.REACTION_RECEIVED,
+                participantId, reactionList, messageId);
         });
 
     chatRoom.addListener(
         XMPPEvents.PRIVATE_MESSAGE_RECEIVED,
 
         // eslint-disable-next-line max-params
-        (jid, txt, myJid, ts) => {
-            const id = Strophe.getResourceFromJid(jid);
+        (jid, txt, myJid, ts, messageId) => {
+            const participantId = Strophe.getResourceFromJid(jid);
 
             conference.eventEmitter.emit(
                 JitsiConferenceEvents.PRIVATE_MESSAGE_RECEIVED,
-                id, txt, ts);
+                participantId, txt, ts, messageId);
         });
 
     chatRoom.addListener(XMPPEvents.PRESENCE_STATUS,
@@ -732,6 +720,11 @@ JitsiConferenceEventManager.prototype.setupStatisticsListeners = function() {
     conference.statistics.addBeforeDisposedListener(() => {
         conference.eventEmitter.emit(
             JitsiConferenceEvents.BEFORE_STATISTICS_DISPOSED);
+    });
+
+    conference.statistics.addEncodeTimeStatsListener((tpc, stats) => {
+        conference.eventEmitter.emit(
+            JitsiConferenceEvents.ENCODE_TIME_STATS_RECEIVED, tpc, stats);
     });
 
     // if we are in startSilent mode we will not be sending/receiving so nothing to detect
